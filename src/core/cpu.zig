@@ -1,9 +1,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const ArrayList = std.ArrayList;
 
 const opcode = @import("opcode.zig");
 const Instruction = opcode.Instruction;
-const hardware = @import("hardware.zig");
 const Memory = @import("memory.zig");
 
 const Stack = @import("stack.zig");
@@ -11,16 +11,16 @@ const StackOptions = Stack.StackOptions;
 const DataSize = Stack.DataSize;
 const Value = Stack.Value;
 
-const VM = @This();
+const CPU = @This();
 
-const VMError = error{
+const CPUError = error{
     IllegalInstruction,
 };
 
 pub const VMOptions = struct {
     working_stack: StackOptions = .{ .max_size = 1024 }, // Default stack size
     return_stack: StackOptions = .{ .max_size = 1024 }, // Default stack size
-    memory: Memory.MemoryOptions = .{ .max_size = 65536 }, // Default memory size
+    memory: Memory.MemoryOptions = .{ .size = 65536 }, // Default memory size
 };
 
 pub const CMPType = enum(u8) {
@@ -61,7 +61,8 @@ const RegisterError = error{
 allocator: Allocator,
 data_stack: Stack,
 return_stack: Stack, // Return stack for subroutine calls
-memory: Memory, // Memory for the VM
+memory: Memory, // Memory for the CPU
+
 registers: struct {
     const Self = @This();
 
@@ -97,11 +98,11 @@ registers: struct {
     }
 } = .{},
 
-pub fn init(options: VMOptions, allocator: Allocator) !VM {
+pub fn init(options: VMOptions, allocator: Allocator) !CPU {
     const working_stack = try Stack.init(options.working_stack, allocator);
     const return_stack = try Stack.init(options.return_stack, allocator);
     const memory = try Memory.init(options.memory, allocator);
-    return VM{
+    return CPU{
         .allocator = allocator,
         .data_stack = working_stack,
         .return_stack = return_stack,
@@ -109,16 +110,18 @@ pub fn init(options: VMOptions, allocator: Allocator) !VM {
     };
 }
 
-pub fn deinit(self: *VM) void {
+pub fn deinit(self: *CPU) void {
     self.data_stack.deinit();
     self.return_stack.deinit();
     self.memory.deinit();
 }
 
-pub fn execute(self: *VM, instruction: u8) !u8 {
-    const inst: Instruction = Instruction.fromByte(instruction);
+pub fn execute(self: *CPU) !u8 {
     var mem_reader = try self.memory.reader();
     var mem_writer = try self.memory.writer();
+
+    const instruction = try mem_reader.readByte(self.registers.pc);
+    const inst: Instruction = Instruction.fromByte(instruction);
     const data_size = switch (inst.width) {
         0 => DataSize.b8, // 8-bit data size
         1 => DataSize.b16, // 16-bit data size
@@ -130,7 +133,7 @@ pub fn execute(self: *VM, instruction: u8) !u8 {
 
     switch (inst.baseOpcode) {
         .special => switch (@as(opcode.StandardOpcode.Special, @enumFromInt((@as(u2, inst.width) << 1) | inst.stack))) {
-            .illegal => return VMError.IllegalInstruction,
+            .illegal => return CPUError.IllegalInstruction,
             .noop => {},
             .ret => {
                 // Handle return from subroutine
@@ -213,9 +216,11 @@ pub fn execute(self: *VM, instruction: u8) !u8 {
                 0 => try selected_stack.popValue(.b8),
                 1 => try selected_stack.popValue(.b16),
             };
+
             const address = try selected_stack.popValue(.b16);
             const values = try selected_stack.pop(count.asU32());
-            if (address.add(count).asU32() > self.memory.data.items.len) return VMError.IllegalInstruction; // Out of bounds TODO
+
+            if (address.asU32() + count.asU32() >= self.memory.data.len) return CPUError.IllegalInstruction; // Out of bounds
             _ = try mem_writer.write(address.b16, values);
         },
 
@@ -284,7 +289,7 @@ pub fn execute(self: *VM, instruction: u8) !u8 {
             };
             const b = try selected_stack.popValue(a.tag());
             // Check for division by zero
-            if (b.asU32() == 0) return VMError.IllegalInstruction; // Handle division by zero
+            if (b.asU32() == 0) return CPUError.IllegalInstruction; // Handle division by zero
             try selected_stack.pushValue(a.div(b));
         },
 
@@ -322,7 +327,7 @@ pub fn execute(self: *VM, instruction: u8) !u8 {
             };
             const b = try selected_stack.popValue(a.tag());
             // Check for division by zero
-            if (b.asU32() == 0) return VMError.IllegalInstruction; // Handle division by zero
+            if (b.asU32() == 0) return CPUError.IllegalInstruction; // Handle division by zero
             try selected_stack.pushValue(a.fx_div(b));
         },
 
@@ -490,8 +495,8 @@ pub fn execute(self: *VM, instruction: u8) !u8 {
 
         .halt => {
             const exit_code = try selected_stack.popValue(.b8);
-            std.debug.print("VM halted with exit code: {}\n", .{exit_code});
-            return exit_code.b8; // Exit the VM
+            std.debug.print("CPU halted with exit code: {}\n", .{exit_code});
+            return exit_code.b8; // Exit the CPU
         },
 
         .int => {
@@ -502,21 +507,8 @@ pub fn execute(self: *VM, instruction: u8) !u8 {
         },
 
         // Add more cases for other opcodes...
-        //else => return VMError.IllegalInstruction,
+        //else => return CPUError.IllegalInstruction,
     }
     self.registers.pc += 1; // Increment program counter after executing instruction
-    return 0; // Return 0 to indicate successful execution
-}
-
-pub fn run(self: *VM, codepoint: u16) !u8 {
-    self.registers.pc = codepoint;
-    while (true) {
-        var reader = try self.memory.reader();
-        const instruction = try reader.readByte(self.registers.pc);
-        const result = try self.execute(instruction);
-        if (result != 0) {
-            return result; // Return the exit code
-        }
-    }
     return 0; // Return 0 to indicate successful execution
 }

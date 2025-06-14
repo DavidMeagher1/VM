@@ -9,46 +9,75 @@ pub const Error = error{
     InvalidAddress,
 };
 
+pub const MemoryFrame = struct {
+    const Error = error{
+        InvalidAddress,
+        OutOfMemory,
+    };
+    address: usize,
+    data: []u8,
+
+    pub fn write(self: *MemoryFrame, address: usize, data: []const u8) !usize {
+        if (address + data.len > self.data.len) {
+            return MemoryFrame.Error.InvalidAddress;
+        }
+        @memcpy(self.data[address .. address + data.len], data);
+        return data.len;
+    }
+
+    pub fn read(self: *MemoryFrame, address: usize, in_buffer: []u8) ![]const u8 {
+        if (address + in_buffer.len > self.data.len) {
+            return MemoryFrame.Error.InvalidAddress;
+        }
+        @memcpy(in_buffer, self.data[address .. address + in_buffer.len]);
+        return in_buffer[0..in_buffer.len];
+    }
+};
+
 allocator: Allocator,
-data: ArrayList(u8),
-max_size: usize,
+data: []u8,
 
 pub const MemoryOptions = struct {
-    max_size: usize,
+    size: usize,
 };
 
 pub fn init(options: MemoryOptions, allocator: Allocator) !Memory {
-    var memory = ArrayList(u8).init(allocator);
-    try memory.ensureTotalCapacity(options.max_size);
-    return Memory{
+    const result = Memory{
         .allocator = allocator,
-        .data = memory,
-        .max_size = options.max_size,
+        .data = try allocator.alloc(u8, options.size),
     };
+    @memset(result.data, 0);
+    return result;
 }
 
 pub fn deinit(self: *Memory) void {
-    self.data.deinit();
+    self.allocator.free(self.data);
+    self.data = &[_]u8{};
+}
+
+pub fn getFrame(self: *Memory, address: usize, size: usize) !MemoryFrame {
+    if (address + size > self.data.len) {
+        return Error.InvalidAddress;
+    }
+    return MemoryFrame{
+        .address = address,
+        .data = self.data[address .. address + size],
+    };
 }
 
 pub fn write(self: *Memory, address: usize, data: []const u8) !usize {
-    if (address + data.len > self.data.items.len and address + data.len <= self.max_size) {
-        try self.data.ensureTotalCapacity(address + data.len);
-    } else if (address + data.len > self.max_size) {
+    if (address + data.len > self.data.len) {
         return Error.OutOfMemory;
     }
-    if (address + data.len > self.data.items.len) {
-        try self.data.resize(address + data.len);
-    }
-    @memcpy(self.data.items[address .. address + data.len], data);
+    @memcpy(self.data[address .. address + data.len], data);
     return data.len;
 }
 
 pub fn read(self: *Memory, address: usize, in_buffer: []u8) ![]const u8 {
-    if (address + in_buffer.len > self.data.items.len) {
+    if (address + in_buffer.len > self.data.len) {
         return Error.InvalidAddress;
     }
-    @memcpy(in_buffer, self.data.items[address .. address + in_buffer.len]);
+    @memcpy(in_buffer, self.data[address .. address + in_buffer.len]);
     return in_buffer[0..in_buffer.len];
 }
 
