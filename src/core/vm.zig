@@ -4,13 +4,12 @@ const Allocator = std.mem.Allocator;
 const opcode = @import("opcode.zig");
 const Instruction = opcode.Instruction;
 const hardware = @import("hardware.zig");
-const Memory = hardware.Memory;
-
-const math = @import("math.zig");
+const Memory = @import("memory.zig");
 
 const Stack = @import("stack.zig");
 const StackOptions = Stack.StackOptions;
 const DataSize = Stack.DataSize;
+const Value = Stack.Value;
 
 const VM = @This();
 
@@ -21,7 +20,7 @@ const VMError = error{
 pub const VMOptions = struct {
     working_stack: StackOptions = .{ .max_size = 1024 }, // Default stack size
     return_stack: StackOptions = .{ .max_size = 1024 }, // Default stack size
-    memory: hardware.MemoryOptions = .{ .max_size = 65536 }, // Default memory size
+    memory: Memory.MemoryOptions = .{ .max_size = 65536 }, // Default memory size
 };
 
 pub const CMPType = enum(u8) {
@@ -45,6 +44,20 @@ pub const CMPType = enum(u8) {
     }
 };
 
+pub const Register = enum {
+    pc,
+    status,
+    wsp,
+    wbp,
+    rsp,
+    rbp,
+    SIZE,
+};
+
+const RegisterError = error{
+    InvalidRegister,
+};
+
 allocator: Allocator,
 data_stack: Stack,
 return_stack: Stack, // Return stack for subroutine calls
@@ -56,21 +69,30 @@ registers: struct {
     status: u8 = 0, // Status register
     // Additional registers can be added here
 
-    pub fn getRegister(self: *Self, index: u8) u16 {
+    pub fn getRegister(self: Self, renum: Register, in_buffer: []u8) !usize {
         // Get a register value by index
-        switch (index) {
-            0 => return self.registers.pc,
-            1 => return self.registers.status,
-            else => return 0, // Handle invalid register access
-        }
+        const value = switch (renum) {
+            .pc => self.pc,
+            .status => self.status,
+            else => return RegisterError.InvalidRegister,
+        };
+        const bytes = &std.mem.toBytes(value);
+        @memcpy(in_buffer, bytes);
+        return bytes.len;
     }
 
-    pub fn setRegister(self: *Self, index: u8, value: u16) void {
+    pub fn setRegister(self: *Self, renum: Register, bytes: []const u8) !void {
         // Set a register value by index
-        switch (index) {
-            0 => self.registers.pc = value,
-            1 => self.registers.status = @intCast(value),
-            else => {}, // Handle invalid register access
+        switch (renum) {
+            .pc => {
+                const value = std.mem.bytesAsValue(u16, bytes);
+                self.pc = value.*;
+            },
+            .status => {
+                const value = std.mem.bytesAsValue(u8, bytes);
+                self.status = value.*;
+            },
+            else => return RegisterError.InvalidRegister,
         }
     }
 } = .{},
@@ -95,27 +117,25 @@ pub fn deinit(self: *VM) void {
 
 pub fn execute(self: *VM, instruction: u8) !u8 {
     const inst: Instruction = Instruction.fromByte(instruction);
+    var mem_reader = try self.memory.reader();
+    var mem_writer = try self.memory.writer();
     const data_size = switch (inst.width) {
         0 => DataSize.b8, // 8-bit data size
         1 => DataSize.b16, // 16-bit data size
-    };
-    const fx_data_size = switch (inst.width) {
-        0 => DataSize.b16, // 16-bit fixed point data size
-        1 => DataSize.b32, // 32-bit fixed point data size
     };
     const selected_stack = switch (inst.stack) {
         0 => &self.data_stack,
         1 => &self.return_stack,
     };
 
-    switch (inst.opcode) {
-        .special => switch (inst.special) {
+    switch (inst.baseOpcode) {
+        .special => switch (@as(opcode.StandardOpcode.Special, @enumFromInt((@as(u2, inst.width) << 1) | inst.stack))) {
             .illegal => return VMError.IllegalInstruction,
             .noop => {},
             .ret => {
                 // Handle return from subroutine
-                const bytes: u16 = try self.return_stack.pop(2);
-                const addr = std.mem.bytesAsValue(u16, bytes);
+                const bytes = try self.return_stack.pop(2);
+                const addr = std.mem.bytesToValue(u16, bytes);
                 self.registers.pc = addr; // Set program counter to return address
 
             },
@@ -123,18 +143,23 @@ pub fn execute(self: *VM, instruction: u8) !u8 {
         },
         .push => {
             self.registers.pc += 1;
-            var data_buffer: [2]u8 = undefined;
             switch (inst.width) {
                 0 => {
-                    self.memory.read(self.registers.pc, &data_buffer[0..1]);
-                    const value = data_buffer[0];
-                    try selected_stack.pushValue(@TypeOf(value), value);
+                    const imm = try mem_reader.readByte(self.registers.pc);
+                    const value = Value{
+                        .b8 = imm,
+                    };
+                    try selected_stack.pushValue(value);
                 },
                 1 => {
-                    self.memory.read(self.registers.pc, &data_buffer[0..2]);
+                    var buffer: [2]u8 = undefined;
+                    const bytes = try mem_reader.read(self.registers.pc, &buffer);
                     self.registers.pc += 1; // Increment PC for 16-bit value
-                    const value = std.mem.bytesAsValue(u16, data_buffer[0..2]);
-                    try selected_stack.pushValue(@TypeOf(value), value);
+                    const imm = std.mem.bytesToValue(u16, bytes);
+                    const value = Value{
+                        .b16 = imm,
+                    };
+                    try selected_stack.pushValue(value);
                 },
             }
         },
@@ -156,199 +181,260 @@ pub fn execute(self: *VM, instruction: u8) !u8 {
 
         .push_reg => {
             self.registers.pc += 1;
-            const T = switch (data_size) {
-                .b8 => u8,
-                .b16 => u16,
-            };
-            var buffer: [1]u8 = undefined;
-            self.memory.read(self.registers.pc, &buffer);
-            const reg_index = buffer[0];
-            const reg_value = self.registers.getRegister(reg_index);
-            try selected_stack.pushValue(@TypeOf(T), reg_value);
+            const reg_index = try mem_reader.readByte(self.registers.pc);
+            if (reg_index >= @intFromEnum(Register.SIZE)) return RegisterError.InvalidRegister;
+            var buffer: [2]u8 = undefined;
+            const count = try self.registers.getRegister(@enumFromInt(reg_index), &buffer);
+            try selected_stack.push(buffer[0..count]);
         },
 
         .pop_reg => {
             self.registers.pc += 1;
-            var buffer: [1]u8 = undefined;
-            self.memory.read(self.registers.pc, &buffer);
-            const reg_index = buffer[0];
-            const value = try selected_stack.popValue(data_size);
-            self.registers.setRegister(reg_index, @as(u16, value));
+            const reg_index = try mem_reader.readByte(self.registers.pc);
+            if (reg_index >= @intFromEnum(Register.SIZE)) return RegisterError.InvalidRegister;
+            const bytes = try selected_stack.pop(data_size.toBytes());
+            try self.registers.setRegister(@enumFromInt(reg_index), bytes);
         },
 
         .load => {
-            const count = try selected_stack.popValue(data_size);
-            const address = try selected_stack.popValue(DataSize.b16);
-            if (address + count > self.memory.max_size) return VMError.IllegalInstruction; // Out of bounds TODO
-            const buffer = self.allocator.alloc(u8, count) catch unreachable;
+            const count = switch (inst.width) {
+                0 => try selected_stack.popValue(.b8),
+                1 => try selected_stack.popValue(.b16),
+            };
+            const address = try selected_stack.popValue(.b16); // Out of bounds TODO
+            const buffer = try self.allocator.alloc(u8, count.asU32());
             defer self.allocator.free(buffer);
-            self.memory.read(address, buffer);
-            const bytes = self.memory.items[address .. address + count];
+            const bytes = try mem_reader.read(address.b16, buffer);
             try selected_stack.push(bytes);
         },
 
         .store => {
-            const count = try selected_stack.popValue(data_size);
-            const address = try selected_stack.popValue(DataSize.b16);
-            const values = try selected_stack.pop(count);
-            if (address + count > self.memory.items.len) return VMError.IllegalInstruction; // Out of bounds TODO
-            self.memory.write(address, values);
+            const count = switch (inst.width) {
+                0 => try selected_stack.popValue(.b8),
+                1 => try selected_stack.popValue(.b16),
+            };
+            const address = try selected_stack.popValue(.b16);
+            const values = try selected_stack.pop(count.asU32());
+            if (address.add(count).asU32() > self.memory.data.items.len) return VMError.IllegalInstruction; // Out of bounds TODO
+            _ = try mem_writer.write(address.b16, values);
         },
 
         .flip => {
             switch (inst.stack) {
                 0 => {
                     // place the top value of the working stack onto the return stack
-                    const top_value = try self.data_stack.popValue(data_size);
-                    try self.return_stack.pushValue(@TypeOf(top_value), top_value);
+                    switch (inst.width) {
+                        0 => {
+                            const top_value = try self.data_stack.popValue(.b8);
+                            try self.return_stack.pushValue(top_value);
+                        },
+                        1 => {
+                            const top_value = try self.data_stack.popValue(.b16);
+                            try self.return_stack.pushValue(top_value);
+                        },
+                    }
                 },
                 1 => {
                     // place the top value of the return stack onto the working stack
-                    const top_value = try self.return_stack.popValue(data_size);
-                    try self.data_stack.pushValue(@TypeOf(top_value), top_value);
+                    switch (inst.width) {
+                        0 => {
+                            const top_value = try self.return_stack.popValue(.b8);
+                            try self.data_stack.pushValue(top_value);
+                        },
+                        1 => {
+                            const top_value = try self.return_stack.popValue(.b16);
+                            try self.data_stack.pushValue(top_value);
+                        },
+                    }
                 },
             }
         },
 
         .add => {
-            const a = try selected_stack.popValue(data_size);
-            const b = try selected_stack.popValue(data_size);
-            try selected_stack.pushValue(@TypeOf(a), a + b);
+            const a = switch (inst.width) {
+                0 => try selected_stack.popValue(.b8),
+                1 => try selected_stack.popValue(.b16),
+            };
+            const b = try selected_stack.popValue(a.tag());
+            try selected_stack.pushValue(a.add(b));
         },
 
         .sub => {
-            const a = try selected_stack.popValue(data_size);
-            const b = try selected_stack.popValue(data_size);
-            try selected_stack.pushValue(@TypeOf(a), a - b);
+            const a = switch (inst.width) {
+                0 => try selected_stack.popValue(.b8),
+                1 => try selected_stack.popValue(.b16),
+            };
+            const b = try selected_stack.popValue(a.tag());
+            try selected_stack.pushValue(a.sub(b));
         },
 
         .mul => {
-            const a = try selected_stack.popValue(data_size);
-            const b = try selected_stack.popValue(data_size);
-            try selected_stack.pushValue(@TypeOf(a), a * b);
+            const a = switch (inst.width) {
+                0 => try selected_stack.popValue(.b8),
+                1 => try selected_stack.popValue(.b16),
+            };
+            const b = try selected_stack.popValue(a.tag());
+            try selected_stack.pushValue(a.mul(b));
         },
 
         .div => {
-            const a = try selected_stack.popValue(data_size);
-            const b = try selected_stack.popValue(data_size);
-            if (b == 0) return VMError.IllegalInstruction; // Handle division by zero
-            try selected_stack.pushValue(@TypeOf(a), a / b);
+            const a = switch (inst.width) {
+                0 => try selected_stack.popValue(.b8),
+                1 => try selected_stack.popValue(.b16),
+            };
+            const b = try selected_stack.popValue(a.tag());
+            // Check for division by zero
+            if (b.asU32() == 0) return VMError.IllegalInstruction; // Handle division by zero
+            try selected_stack.pushValue(a.div(b));
         },
 
         .fx_add => {
-            const a = try selected_stack.popValue(fx_data_size);
-            const b = try selected_stack.popValue(fx_data_size);
-            try selected_stack.pushValue(@TypeOf(a), math.fx_add(@TypeOf(a), a, b));
+            const a = switch (inst.width) {
+                0 => try selected_stack.popValue(.b16),
+                1 => try selected_stack.popValue(.b32),
+            };
+            const b = try selected_stack.popValue(a.tag());
+            try selected_stack.pushValue(a.fx_add(b));
         },
 
         .fx_sub => {
-            const a = try selected_stack.popValue(fx_data_size);
-            const b = try selected_stack.popValue(fx_data_size);
-            try selected_stack.pushValue(@TypeOf(a), math.fx_sub(@TypeOf(a), a, b));
+            const a = switch (inst.width) {
+                0 => try selected_stack.popValue(.b16),
+                1 => try selected_stack.popValue(.b32),
+            };
+            const b = try selected_stack.popValue(a.tag());
+            try selected_stack.pushValue(a.fx_sub(b));
         },
 
         .fx_mul => {
-            const a = try selected_stack.popValue(fx_data_size);
-            const b = try selected_stack.popValue(fx_data_size);
-            const result = try math.fx_mul(@TypeOf(a), a, b);
-            try selected_stack.pushValue(@TypeOf(a), result);
+            const a = switch (inst.width) {
+                0 => try selected_stack.popValue(.b16),
+                1 => try selected_stack.popValue(.b32),
+            };
+            const b = try selected_stack.popValue(a.tag());
+            try selected_stack.pushValue(a.fx_mul(b));
         },
 
         .fx_div => {
-            const a = try selected_stack.popValue(fx_data_size);
-            const b = try selected_stack.popValue(fx_data_size);
-            const result = try math.fx_div(@TypeOf(a), a, b);
-            try selected_stack.pushValue(@TypeOf(a), result);
+            const a = switch (inst.width) {
+                0 => try selected_stack.popValue(.b16),
+                1 => try selected_stack.popValue(.b32),
+            };
+            const b = try selected_stack.popValue(a.tag());
+            // Check for division by zero
+            if (b.asU32() == 0) return VMError.IllegalInstruction; // Handle division by zero
+            try selected_stack.pushValue(a.fx_div(b));
         },
 
         .@"and" => {
-            const a = try selected_stack.popValue(data_size);
-            const b = try selected_stack.popValue(data_size);
-            try selected_stack.pushValue(@TypeOf(a), a & b);
+            const a = switch (inst.width) {
+                0 => try selected_stack.popValue(.b8),
+                1 => try selected_stack.popValue(.b16),
+            };
+            const b = try selected_stack.popValue(a.tag());
+            try selected_stack.pushValue(a.@"and"(b));
         },
 
         .@"or" => {
-            const a = try selected_stack.popValue(data_size);
-            const b = try selected_stack.popValue(data_size);
-            try selected_stack.pushValue(@TypeOf(a), a | b);
+            const a = switch (inst.width) {
+                0 => try selected_stack.popValue(.b8),
+                1 => try selected_stack.popValue(.b16),
+            };
+            const b = try selected_stack.popValue(a.tag());
+            try selected_stack.pushValue(a.@"or"(b));
         },
 
         .xor => {
-            const a = try selected_stack.popValue(data_size);
-            const b = try selected_stack.popValue(data_size);
-            try selected_stack.pushValue(@TypeOf(a), a ^ b);
+            const a = switch (inst.width) {
+                0 => try selected_stack.popValue(.b8),
+                1 => try selected_stack.popValue(.b16),
+            };
+            const b = try selected_stack.popValue(a.tag());
+            try selected_stack.pushValue(a.xor(b));
         },
 
         .not => {
-            const a = try selected_stack.popValue(data_size);
-            try selected_stack.pushValue(@TypeOf(a), ~a);
+            const a = switch (inst.width) {
+                0 => try selected_stack.popValue(.b8),
+                1 => try selected_stack.popValue(.b16),
+            };
+            try selected_stack.pushValue(a.not());
         },
 
         .shl => {
-            const a = try selected_stack.popValue(data_size);
-            const b = try selected_stack.popValue(data_size);
-            try selected_stack.pushValue(@TypeOf(a), a << b);
+            const a = switch (inst.width) {
+                0 => try selected_stack.popValue(.b8),
+                1 => try selected_stack.popValue(.b16),
+            };
+            const b = try selected_stack.popValue(a.tag());
+            try selected_stack.pushValue(a.shl(b));
         },
 
         .shr => {
-            const a = try selected_stack.popValue(data_size);
-            const b = try selected_stack.popValue(data_size);
-            try selected_stack.pushValue(@TypeOf(a), a >> b);
+            const a = switch (inst.width) {
+                0 => try selected_stack.popValue(.b8),
+                1 => try selected_stack.popValue(.b16),
+            };
+            const b = try selected_stack.popValue(a.tag());
+            try selected_stack.pushValue(a.shr(b));
         },
 
         .cmp => {
             self.registers.pc += 1; // Increment PC to get the immediate value
-            const buffer: [1]u8 = undefined;
-            self.memory.read(self.registers.pc, &buffer);
+            var buffer: [1]u8 = undefined;
+            _ = try mem_reader.read(self.registers.pc, &buffer);
             const cmp_type = CMPType.fromByte(buffer[0]);
-            const a = try selected_stack.popValue(data_size);
-            const b = try selected_stack.popValue(data_size);
+            const a = switch (inst.width) {
+                0 => try selected_stack.popValue(.b8),
+                1 => try selected_stack.popValue(.b16),
+            };
+            const b = try selected_stack.popValue(a.tag());
             const result = @intFromBool(switch (cmp_type) {
-                .Equal => a == b,
-                .NotEqual => a != b,
-                .LessThan => a < b,
-                .GreaterThan => a > b,
-                .LessThanOrEqual => a <= b,
-                .GreaterThanOrEqual => a >= b,
+                .Equal => a.equal(b),
+                .NotEqual => !a.equal(b),
+                .LessThan => a.lessThan(b),
+                .GreaterThan => !a.lessThan(b),
+                .LessThanOrEqual => a.lessThanEqual(b),
+                .GreaterThanOrEqual => !a.lessThan(b) or a.equal(b),
             });
             // Push the result of the comparison back onto the stack
-            try selected_stack.pushValue(u8, result);
+            try selected_stack.pushValue(Value{ .b8 = result });
         },
 
         .jmp => {
             self.registers.pc += 1; // Increment PC to get the immediate address
             // if datasize is 8 bits read 1 byte and treat it as a relative jump
-            switch (data_size) {
-                .b8 => {
-                    const buffer: [1]u8 = undefined;
-                    self.memory.read(self.registers.pc, &buffer);
-                    const offset: i8 = @bitCast(buffer[0]);
-                    self.registers.pc += offset; // Relative jump
+            switch (inst.width) {
+                0 => {
+                    var buffer: [1]u8 = undefined;
+                    _ = try mem_reader.read(self.registers.pc, &buffer);
+                    const new_pc = @addWithOverflow(buffer[0], self.registers.pc);
+                    self.registers.pc = new_pc[0]; // Relative jump
                 },
-                .b16 => {
-                    const buffer: [2]u8 = undefined;
-                    self.memory.read(self.registers.pc, &buffer);
-                    self.registers.pc = std.mem.bytesAsValue(u16, &buffer); // Absolute jump
+                1 => {
+                    var buffer: [2]u8 = undefined;
+                    _ = try mem_reader.read(self.registers.pc, &buffer);
+                    self.registers.pc = std.mem.bytesAsValue(u16, &buffer).*; // Absolute jump
                 },
             }
             return 0;
         },
 
         .jnz => {
-            const condition = try selected_stack.popValue(data_size);
-            if (condition != 0) {
+            const condition = try selected_stack.popValue(.b8);
+            if (condition.b8 != 0) {
                 self.registers.pc += 1; // Increment PC to get the immediate address
-                switch (data_size) {
-                    .b8 => {
-                        const buffer: [1]u8 = undefined;
-                        self.memory.read(self.registers.pc, &buffer);
-                        const offset: i8 = @bitCast(buffer[0]);
-                        self.registers.pc += offset; // Relative jump
+                switch (inst.width) {
+                    0 => {
+                        var buffer: [1]u8 = undefined;
+                        _ = try self.memory.read(self.registers.pc, &buffer);
+                        const new_pc = @addWithOverflow(buffer[0], self.registers.pc);
+                        self.registers.pc = new_pc[0]; // Relative jump
                     },
-                    .b16 => {
-                        const buffer: [2]u8 = undefined;
-                        self.memory.read(self.registers.pc, &buffer);
-                        self.registers.pc = std.mem.bytesAsValue(u16, &buffer); // Absolute jump
+                    1 => {
+                        var buffer: [2]u8 = undefined;
+                        _ = try self.memory.read(self.registers.pc, &buffer);
+                        self.registers.pc = std.mem.bytesAsValue(u16, &buffer).*; // Absolute jump
                     },
                 }
             }
@@ -356,35 +442,35 @@ pub fn execute(self: *VM, instruction: u8) !u8 {
         },
 
         .call => {
-            const is_direct = inst.w == 0; // Check if it's a direct call
-            const is_foreign = inst.s == 1; // Check if it's a foreign function call
+            const is_direct = inst.width == 0; // Check if it's a direct call
+            const is_foreign = inst.stack == 1; // Check if it's a foreign function call
             if (is_direct) {
                 self.registers.pc += 1; // Increment PC to get the immediate address
                 if (!is_foreign) {
                     // Direct call, read the next 2 bytes as the address
-                    const buffer: [2]u8 = undefined;
-                    self.memory.read(self.registers.pc, &buffer);
-                    const addr = std.mem.bytesAsValue(u16, &buffer);
-                    try self.return_stack.pushValue(u16, self.registers.pc + 2); // Push return address onto return stack
+                    var buffer: [2]u8 = undefined;
+                    _ = try mem_reader.read(self.registers.pc, &buffer);
+                    const addr = std.mem.bytesAsValue(u16, &buffer).*;
+                    try self.return_stack.pushValue(Value{ .b16 = self.registers.pc + 2 }); // Push return address onto return stack
                     self.registers.pc = addr; // Jump to subroutine
                 } else {
                     // todo: handle foreign function call
                     // For now, we just print the address as an example
-                    const buffer: [2]u8 = undefined;
-                    self.memory.read(self.registers.pc, &buffer);
+                    var buffer: [2]u8 = undefined;
+                    _ = try mem_reader.read(self.registers.pc, &buffer);
                     const addr = std.mem.bytesAsValue(u16, &buffer);
                     std.debug.print("Foreign function call to address: {}\n", .{addr});
                 }
             } else {
                 if (!is_foreign) {
                     // Indirect call, get the address from the top of the working stack
-                    const addr = try selected_stack.popValue(DataSize.b16);
-                    try self.return_stack.pushValue(u16, self.registers.pc + 2); // Push return address onto return stack
-                    self.registers.pc = @as(u16, addr); // Jump to subroutine
+                    const addr = try selected_stack.popValue(.b16);
+                    try self.return_stack.pushValue(Value{ .b16 = self.registers.pc + 2 }); // Push return address onto return stack
+                    self.registers.pc = addr.b16; // Jump to subroutine
                 } else {
                     //todo: handle foreign function call
                     // For now, we just print the address as an example
-                    const addr = try selected_stack.popValue(DataSize.b16);
+                    const addr = try selected_stack.popValue(.b16);
                     std.debug.print("Foreign function call to address: {}\n", .{addr});
                 }
             }
@@ -393,41 +479,44 @@ pub fn execute(self: *VM, instruction: u8) !u8 {
 
         .trap => {
             // Perform a system call to the host via a trap code from the top of the selected stack
-            const trap_code = try selected_stack.popValue(data_size);
+            const trap_code = switch (inst.width) {
+                0 => try selected_stack.popValue(.b8),
+                1 => try selected_stack.popValue(.b16),
+            };
             // Here you would handle the trap code, e.g., by calling a host function
             // For now, we just print it as an example
             std.debug.print("Trap code: {}\n", .{trap_code});
         },
 
         .halt => {
-            const exit_code = try selected_stack.popValue(DataSize.b8);
+            const exit_code = try selected_stack.popValue(.b8);
             std.debug.print("VM halted with exit code: {}\n", .{exit_code});
-            return exit_code; // Exit the VM
+            return exit_code.b8; // Exit the VM
         },
 
         .int => {
             // Signal a software interrupt, the interrupt id will be in the top value of the selected stack
-            const interrupt_id = try selected_stack.popValue(DataSize.b8);
+            const interrupt_id = try selected_stack.popValue(.b8);
             // Here you would handle the interrupt, e.g., by calling an interrupt handler
             std.debug.print("Software interrupt with ID: {}\n", .{interrupt_id});
         },
 
         // Add more cases for other opcodes...
-        else => return VMError.IllegalInstruction,
+        //else => return VMError.IllegalInstruction,
     }
     self.registers.pc += 1; // Increment program counter after executing instruction
     return 0; // Return 0 to indicate successful execution
 }
 
-pub fn run(self: *VM, bytecode: []const u8) !u8 {
-    self.memory.ensureTotalCapacity(bytecode.len) catch unreachable;
-    @memcpy(self.memory.items, bytecode);
-    while (self.registers.pc < self.memory.items.len) {
-        const instruction = self.memory.items[self.registers.pc];
+pub fn run(self: *VM, codepoint: u16) !u8 {
+    self.registers.pc = codepoint;
+    while (true) {
+        var reader = try self.memory.reader();
+        const instruction = try reader.readByte(self.registers.pc);
         const result = try self.execute(instruction);
         if (result != 0) {
-            return result; // Return if an error occurred or if the VM halted
+            return result; // Return the exit code
         }
     }
-    return 0; // Return 0 to indicate successful execution of the bytecode
+    return 0; // Return 0 to indicate successful execution
 }

@@ -96,10 +96,10 @@ pub const Instruction = packed struct {
     //extendedOpcode: ?ExtendedOpcode = null, // O O O O O - O O O O O O O O
 
     pub fn fromByte(byte: u8) Instruction {
-        const extension = @as(u1, (byte & 0x80) >> 7); // E
-        const width = @as(u1, (byte & 0x40) >> 6); // W
-        const stack = @as(u1, (byte & 0x20) >> 5); // S
-        const baseOpcode: StandardOpcode = @enumFromInt(@as(u5, byte & 0x1F)); // O O O O O
+        const extension: u1 = @truncate((byte & 0x80) >> 7); // E
+        const width: u1 = @truncate((byte & 0x40) >> 6); // W
+        const stack: u1 = @truncate((byte & 0x20) >> 5); // S
+        const baseOpcode: StandardOpcode = @enumFromInt(@as(u5, @truncate(byte & 0x1F))); // O O O O O
 
         return Instruction{
             .extension = extension,

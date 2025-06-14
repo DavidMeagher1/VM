@@ -33,7 +33,7 @@ pub fn main() !void {
             .width = 0,
             .stack = 0,
             .baseOpcode = core.opcode.StandardOpcode.add,
-        }).toByte(),
+        }).toByte(), // add 5 and 3,
         (Instruction{
             .extension = 0,
             .width = 0,
@@ -42,8 +42,8 @@ pub fn main() !void {
         }).toByte(),
     }; // add 5 and 3 then halt exit code should be 8
     // load the bytecode into the VM
-    try vm.memory.write(0, &code);
+    _ = try vm.memory.write(0, &code);
     // run the VM
-    const result = vm.run();
+    const result = try vm.run(0);
     std.debug.print("Result: {}\n", .{result});
 }
