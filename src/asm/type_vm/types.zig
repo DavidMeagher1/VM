@@ -45,6 +45,8 @@ pub const Type = union(enum) {
     null: void,
     bool: void,
     type: TypeIndex,
+    comptime_int: void,
+    comptime_fixed: void,
     integer: struct {
         sign: Sign,
         size: u5, // the max number is 31 so the actual size is size + 1
@@ -362,6 +364,108 @@ pub const Type = union(enum) {
         }
 
         return Error.AlignmentError;
+    }
+
+    pub fn canMath(self: Type, target: Type) bool {
+        const self_tag = meta.activeTag(self);
+        const target_tag = meta.activeTag(target);
+        if (self.alignment() != target.alignment()) {
+            return false;
+        }
+        // integer to integer
+        if (self_tag == .integer and self.isEqual(target)) {
+            return true;
+        }
+        // fixed to fixed
+        if (self_tag == .fixed and self.isEqual(target)) {
+            return true;
+        }
+        // pointer to integer
+        if (self_tag == .pointer and target_tag == .integer and self.pointer.kind == .many) {
+            return true;
+        }
+        // integer to pointer
+        if (self_tag == .integer and target_tag == .pointer and target.pointer.kind == .many) {
+            return true;
+        }
+        return false;
+    }
+
+    pub fn canShift(self: Type, target: Type) bool {
+        const self_tag = meta.activeTag(self);
+        const target_tag = meta.activeTag(target);
+        if (self.alignment() != target.alignment()) {
+            return false;
+        }
+        // integer to integer
+        if (self_tag == .integer and target_tag == .integer) {
+            if (target.integer.size == @log2(self.integer.size)) {
+                return true;
+            }
+            return false;
+        }
+        // pointer to integer
+        if (self_tag == .pointer and target_tag == .integer and self.pointer.kind == .many) {
+            if (target.integer.size == @log2(16)) {
+                return true;
+            }
+            return false;
+        }
+        // integer to pointer
+        if (self_tag == .integer and target_tag == .pointer and target.pointer.kind == .many) {
+            if (self.integer.size == @log2(16)) {
+                return true;
+            }
+            return false;
+        }
+        return false;
+    }
+
+    pub fn canLogic(self: Type, target: Type) bool {
+        const self_tag = meta.activeTag(self);
+        const target_tag = meta.activeTag(target);
+        if (self.alignment() != target.alignment()) {
+            return false;
+        }
+        // integer to integer
+        if (self_tag == .integer and target_tag == .integer) {
+            if (self.integer.size == target.integer.size) {
+                return true;
+            }
+            return false;
+        }
+        return false;
+    }
+
+    pub fn canCompare(self: Type, target: Type) bool {
+        const self_tag = meta.activeTag(self);
+        const target_tag = meta.activeTag(target);
+        if (self.alignment() != target.alignment()) {
+            return false;
+        }
+        // integer to integer
+        if (self_tag == .integer and target_tag == .integer) {
+            return true;
+        }
+        // fixed to fixed
+        if (self_tag == .fixed and target_tag == .fixed) {
+            return true;
+        }
+
+        // pointer to pointer
+        if (self_tag == .pointer and target_tag == .pointer) {
+            return true;
+        }
+        // pointer to integer
+        if (self_tag == .pointer and target_tag == .integer and self.pointer.kind == .many) {
+            return true;
+        }
+        // integer to pointer
+        if (self_tag == .integer and target_tag == .pointer and target.pointer.kind == .many) {
+            return true;
+        }
+
+        return false;
     }
 };
 

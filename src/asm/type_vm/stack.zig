@@ -77,28 +77,6 @@ pub fn over(self: *Stack) !void {
     self.sp += 1;
 }
 
-pub fn nip(self: *Stack) !void {
-    // like pop but for the second last element
-    if (self.sp < 2) {
-        return Error.StackUnderflow;
-    }
-    self.data.items[self.sp - 2] = self.data.items[self.sp - 1];
-    self.sp -= 1;
-}
-
-pub fn rot(self: *Stack) !void {
-    // rotate the top 3 elements
-    if (self.sp < 3) {
-        return Error.StackUnderflow;
-    }
-    const a = self.data.items[self.sp - 1];
-    const b = self.data.items[self.sp - 2];
-    const c = self.data.items[self.sp - 3];
-    self.data.items[self.sp - 1] = b;
-    self.data.items[self.sp - 2] = c;
-    self.data.items[self.sp - 3] = a;
-}
-
 const std = @import("std");
 const ArrayList = std.ArrayList;
 const Allocator = std.mem.Allocator;
