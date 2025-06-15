@@ -19,7 +19,13 @@ pub fn deinit(self: *VM) void {
     self.return_stack.deinit();
 }
 
-pub fn execute(self: *VM) !u8 {
+pub fn execute(self: *VM) !Type {
+    // this vm is used for type validation,
+    // so it will only execute the instructions that the standard vm will execute
+    // though it will validate the types of the instructions
+    // and then return the type result of the instruction
+    // void types mean nothing came off of the stack
+
     var mem_reader = try self.memory.reader();
     const byte = try mem_reader.readByte();
     const instruction = Instruction.fromByte(byte);
@@ -32,33 +38,24 @@ pub fn execute(self: *VM) !u8 {
             const type_index: TypeIndex = std.mem.bytesToValue(TypeIndex, data);
             const type_ = try self.registry.get_type_by_index(type_index);
             try stack.push(type_);
+            return types.t_void;
         },
         .pop => {
-            _ = try stack.pop();
+            return try stack.pop();
         },
         .dup => {
             try stack.dup();
+            return types.t_void;
         },
         .swap => {
             try stack.swap();
+            return types.t_void;
         },
         .over => {
             try stack.over();
+            return types.t_void;
         },
-        .push_reg => {
-            // push reg takes an immediate value
-            // the immediate value is the index of the register
-            // and then it will push the value of the register onto the stack
-            const reg_index = try stack.pop();
-            if (!reg_index.isEqual(.{ .integer = .{
-                .size = 8,
-                .sign = .unsigned,
-                .alignment = 1,
-            } })) {}
-            const type_index: TypeIndex = @intCast(data);
-            const type_ = try self.registry.get_type_by_index(type_index);
-            try stack.push(type_);
-        },
+        .push_reg => {},
     }
     self.pc += 1;
 }

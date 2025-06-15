@@ -98,6 +98,24 @@ pub const Type = union(enum) {
 
     pub fn size(self: *Type) u32 {
         switch (meta.activeTag(self)) {
+            .void => {
+                return 0;
+            },
+            .null => {
+                return 0;
+            },
+            .bool => {
+                return 1;
+            },
+            .type => {
+                return 4; // type index is always 4 bytes
+            },
+            .comptime_int => {
+                return 2; // comptime int is always 2 bytes
+            },
+            .comptime_fixed => {
+                return 4; // comptime fixed is always 4 bytes
+            },
             .integer => |i| {
                 return i.size + 1 / 8;
             },
@@ -127,6 +145,24 @@ pub const Type = union(enum) {
 
     pub fn alignment(self: *Type) u32 {
         switch (meta.activeTag(self)) {
+            .void => {
+                return 0;
+            },
+            .null => {
+                return 0;
+            },
+            .bool => {
+                return 1;
+            },
+            .type => {
+                return 4; // type index is always 4 bytes
+            },
+            .comptime_int => {
+                return 2; // comptime int is always 2 bytes
+            },
+            .comptime_fixed => {
+                return 4; // comptime fixed is always 4 bytes
+            },
             .integer => |i| {
                 return i.alignment;
             },
@@ -229,18 +265,47 @@ pub const Type = union(enum) {
         if (self.isEqual(target)) return self;
         const self_tag = meta.activeTag(self);
         const target_tag = meta.activeTag(target);
+        // special case for comptime_int and comptime_fixed
+        if (self_tag == .comptime_int and target_tag == .comptime_fixed) {
+            return target;
+        }
+
+        if (self_tag == .comptime_fixed and target_tag == .comptime_int) {
+            return target;
+        }
+
+        // comptime_int to integer
+        if (self_tag == .comptime_int and target_tag == .integer) {
+            return target;
+        }
+
+        // comptime_fixed to fixed
+        if (self_tag == .comptime_fixed and target_tag == .fixed) {
+            return target;
+        }
+
         if (self.alignment() != target.alignment()) {
             return Error.AlignmentError;
         }
+
         if (self_tag == target_tag and self.isSmaller(target)) {
             return target;
         }
+
+        return Error.InvalidConversionError;
     }
 
     pub fn convert(self: Type, target: Type) !Type {
         if (self.isEqual(target)) return self;
         const self_tag = meta.activeTag(self);
         const target_tag = meta.activeTag(target);
+        // special case for comptime_int and comptime_fixed
+        if (self_tag == .comptime_int and target_tag == .comptime_fixed) {
+            return target;
+        }
+        if (self_tag == .comptime_fixed and target_tag == .comptime_int) {
+            return target;
+        }
         if (self.alignment() != target.alignment()) {
             return Error.AlignmentError;
         }
@@ -323,6 +388,23 @@ pub const Type = union(enum) {
         if (self.isEqual(target)) return self;
         const self_tag = meta.activeTag(self);
         const target_tag = meta.activeTag(target);
+
+        // special case for comptime_int and comptime_fixed
+        if (self_tag == .comptime_int and target_tag == .comptime_fixed) {
+            return target;
+        }
+        if (self_tag == .comptime_fixed and target_tag == .comptime_int) {
+            return target;
+        }
+        // comptime_int to integer
+        if (self_tag == .comptime_int and target_tag == .integer) {
+            return target;
+        }
+        // comptime_fixed to fixed
+        if (self_tag == .comptime_fixed and target_tag == .fixed) {
+            return target;
+        }
+
         if (self.alignment() != target.alignment()) {
             return Error.AlignmentError;
         }
@@ -369,9 +451,42 @@ pub const Type = union(enum) {
     pub fn canMath(self: Type, target: Type) bool {
         const self_tag = meta.activeTag(self);
         const target_tag = meta.activeTag(target);
+        // special cases for comptime_int and comptime_fixed
+        if (self_tag == .comptime_int and target_tag == .comptime_fixed) {
+            return true;
+        }
+        if (self_tag == .comptime_fixed and target_tag == .comptime_int) {
+            return true;
+        }
+        // comptime_int to integer
+        if (self_tag == .comptime_int and target_tag == .integer) {
+            return true;
+        }
+        // integer to comptime_int
+        if (self_tag == .integer and target_tag == .comptime_int) {
+            return true;
+        }
+        // comptime_fixed to fixed
+        if (self_tag == .comptime_fixed and target_tag == .fixed) {
+            return true;
+        }
+        // fixed to comptime_fixed
+        if (self_tag == .fixed and target_tag == .comptime_fixed) {
+            return true;
+        }
+        //comptime_int to pointer
+        if (self_tag == .comptime_int and target_tag == .pointer) {
+            return target.pointer.kind == .many;
+        }
+        // pointer to comptime_int
+        if (self_tag == .pointer and target_tag == .comptime_int) {
+            return self.pointer.kind == .many;
+        }
+
         if (self.alignment() != target.alignment()) {
             return false;
         }
+
         // integer to integer
         if (self_tag == .integer and self.isEqual(target)) {
             return true;
@@ -394,6 +509,25 @@ pub const Type = union(enum) {
     pub fn canShift(self: Type, target: Type) bool {
         const self_tag = meta.activeTag(self);
         const target_tag = meta.activeTag(target);
+
+        // special cases for comptime_int
+        if (self_tag == .comptime_int and target_tag == .comptime_int) {
+            return true;
+        }
+        if (self_tag == .comptime_int and target_tag == .integer) {
+            return true;
+        }
+        if (self_tag == .integer and target_tag == .comptime_int) {
+            return true;
+        }
+        // special cases for comptime_int and pointer
+        if (self_tag == .comptime_int and target_tag == .pointer) {
+            return target.pointer.kind == .many;
+        }
+        if (self_tag == .pointer and target_tag == .comptime_int) {
+            return self.pointer.kind == .many;
+        }
+
         if (self.alignment() != target.alignment()) {
             return false;
         }
@@ -424,6 +558,16 @@ pub const Type = union(enum) {
     pub fn canLogic(self: Type, target: Type) bool {
         const self_tag = meta.activeTag(self);
         const target_tag = meta.activeTag(target);
+        // special cases for comptime_int
+        if (self_tag == .comptime_int and target_tag == .comptime_int) {
+            return true;
+        }
+        if (self_tag == .comptime_int and target_tag == .integer) {
+            return true;
+        }
+        if (self_tag == .integer and target_tag == .comptime_int) {
+            return true;
+        }
         if (self.alignment() != target.alignment()) {
             return false;
         }
@@ -440,6 +584,34 @@ pub const Type = union(enum) {
     pub fn canCompare(self: Type, target: Type) bool {
         const self_tag = meta.activeTag(self);
         const target_tag = meta.activeTag(target);
+        // special cases for comptime_int
+        if (self_tag == .comptime_int and target_tag == .comptime_int) {
+            return true;
+        }
+        if (self_tag == .comptime_int and target_tag == .integer) {
+            return true;
+        }
+        if (self_tag == .integer and target_tag == .comptime_int) {
+            return true;
+        }
+        // special cases for comptime_fixed
+        if (self_tag == .comptime_fixed and target_tag == .comptime_fixed) {
+            return true;
+        }
+        if (self_tag == .comptime_fixed and target_tag == .fixed) {
+            return true;
+        }
+        if (self_tag == .fixed and target_tag == .comptime_fixed) {
+            return true;
+        }
+        // special cases for comptime_int and pointer
+        if (self_tag == .comptime_int and target_tag == .pointer) {
+            return target.pointer.kind == .many;
+        }
+        if (self_tag == .pointer and target_tag == .comptime_int) {
+            return self.pointer.kind == .many;
+        }
+
         if (self.alignment() != target.alignment()) {
             return false;
         }
@@ -515,6 +687,14 @@ pub fn Pointer(kind: u1, type_index: TypeIndex) Type {
         },
     };
 }
+
+// the following types are used because they have no configuration
+pub const t_void = Type{ .void = {} };
+pub const t_null = Type{ .null = {} };
+pub const t_bool = Type{ .bool = {} };
+pub const t_type = Type{ .type = {} };
+pub const t_comptime_int = Type{ .comptime_int = {} };
+pub const t_comptime_fixed = Type{ .comptime_fixed = {} };
 
 const std = @import("std");
 const meta = std.meta;
