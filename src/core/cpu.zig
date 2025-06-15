@@ -47,6 +47,9 @@ pub const CMPType = enum(u8) {
 pub const Register = enum {
     pc,
     status,
+    // bit layout:
+    // 0: 0x01 - Interrupt enable 0x00 - Interrupt disable
+    interrupt_mask,
     wsp,
     wbp,
     rsp,
@@ -68,6 +71,7 @@ registers: struct {
 
     pc: u16 = 0, // Program counter
     status: u8 = 0, // Status register
+    intm: u16 = 0, // Interrupt mask register
     // Additional registers can be added here
 
     pub fn getRegister(self: Self, renum: Register, in_buffer: []u8) !usize {
@@ -75,6 +79,11 @@ registers: struct {
         const value = switch (renum) {
             .pc => self.pc,
             .status => self.status,
+            .intm => self.intm,
+            .wsp => self.data_stack.sp,
+            .wbp => self.data_stack.bp,
+            .rsp => self.return_stack.sp,
+            .rbp => self.return_stack.bp,
             else => return RegisterError.InvalidRegister,
         };
         const bytes = &std.mem.toBytes(value);
@@ -92,6 +101,26 @@ registers: struct {
             .status => {
                 const value = std.mem.bytesAsValue(u8, bytes);
                 self.status = value.*;
+            },
+            .intm => {
+                const value = std.mem.bytesAsValue(u16, bytes);
+                self.intm = value.*;
+            },
+            .wsp => {
+                const value = std.mem.bytesAsValue(u16, bytes);
+                self.data_stack.sp = value.*;
+            },
+            .wbp => {
+                const value = std.mem.bytesAsValue(u16, bytes);
+                self.data_stack.bp = value.*;
+            },
+            .rsp => {
+                const value = std.mem.bytesAsValue(u16, bytes);
+                self.return_stack.sp = value.*;
+            },
+            .rbp => {
+                const value = std.mem.bytesAsValue(u16, bytes);
+                self.return_stack.bp = value.*;
             },
             else => return RegisterError.InvalidRegister,
         }
@@ -511,4 +540,23 @@ pub fn execute(self: *CPU) !u8 {
     }
     self.registers.pc += 1; // Increment program counter after executing instruction
     return 0; // Return 0 to indicate successful execution
+}
+
+pub fn hardwareInterrupt(self: *CPU, interrupt_id: u8) !void {
+    // old return stack pointer is set to bp
+    if ((self.registers.status & 0x01) == 0) {
+        return; // Maskable Interrupts are disabled
+    }
+    if ((self.registers.intm & (1 << interrupt_id)) == 0) {
+        return; // Interrupt is not enabled
+    }
+
+    try self.return_stack.pushValue(Value{ .b16 = self.registers.pc });
+    try self.return_stack.pushValue(Value{ .b8 = self.registers.status });
+    try self.return_stack.pushValue(Value{ .b16 = self.registers.intm });
+    //TODO : interrupt vector table
+    //TODO : set the program counter to the interrupt vector address
+    self.registers.pc = 0; // Set program counter to interrupt vector address
+    self.registers.status &= 0xFE; // Disable interrupts
+
 }

@@ -95,9 +95,60 @@ Both working and return stacks:
   - Working stack: General computation
   - Return stack: Subroutine call management
 
+## Hardware Interface
+The VM supports virtual hardware devices that operate through memory frames.
+
+### Memory Frame Model
+- Hardware devices are assigned specific memory frames
+- A memory frame is a contiguous section of VM memory
+- Frames are allocated using start address and size
+- Multiple devices can operate on different memory frames
+
+### Hardware Implementation
+Hardware devices are implemented using a generic interface:
+```zig
+const Hardware = fn(
+    DeviceType: type,
+    ErrorType: type,
+    updateFn: fn(*DeviceType, *MemoryFrame) ErrorType!void,
+) type;
+```
+
+Each hardware device must provide:
+1. A device type struct with any needed state
+2. An error set for device-specific errors
+3. An update function that processes the memory frame
+
+### Update Cycle
+- Hardware devices are updated after each VM instruction
+- Devices can read from and write to their memory frame
+- Communication between VM and hardware is through memory modification
+- Devices can signal events by writing to specific memory addresses
+
+### Example Usage
+A simple hardware device that responds to memory signals:
+```zig
+const Test = struct {
+    const Error = error{ TestError };
+    
+    pub fn update(self: *Test, memory: *MemoryFrame) !void {
+        if (memory.data[0] == 0xAF) {
+            // React to signal
+            memory.data[0] = 0;
+        }
+    }
+};
+
+// Create hardware instance
+var hardware = try Hardware(Test, Test.Error, Test.update).init(Test{});
+hardware.memory = try cpu.memory.getFrame(0x20, 0x0A);
+```
+
 ## Error Handling
 The VM handles several error conditions:
 - Illegal instructions
 - Stack overflow/underflow
 - Invalid memory access
 - Division by zero
+- Hardware-specific errors
+- Memory frame access violations

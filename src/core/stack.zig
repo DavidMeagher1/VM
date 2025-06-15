@@ -198,8 +198,8 @@ pub const Value = union(DataSize) {
 pub const StackOptions = struct {
     max_size: usize = 1024, // Default maximum size of the stack
 };
-sp: u32 = 0,
-bp: u32 = 0,
+sp: u16 = 0,
+bp: u16 = 0,
 data: ArrayList(u8),
 max_size: usize,
 
