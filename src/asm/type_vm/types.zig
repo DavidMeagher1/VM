@@ -3,7 +3,7 @@
 // 128, 64, 32, 16, 8, 4, 2, 1
 
 pub const TypeIndex = u32;
-const TypeList = ArrayList(Type);
+pub const TypeList = ArrayList(Type);
 
 pub const FieldInfo = struct {
     name: []const u8,
@@ -13,6 +13,11 @@ pub const FieldInfo = struct {
 pub const UnionFieldInfo = struct {
     name: []const u8,
     type_index: TypeIndex,
+};
+
+pub const EnumFieldInfo = struct {
+    name: []const u8,
+    value: u8,
 };
 
 pub const Sign = enum {
@@ -29,6 +34,14 @@ pub const Alignment = enum {
     one,
     two,
     four,
+
+    pub fn nearestAlignment(bits: u5) Alignment {
+        // this should round up to the nearest alignment
+        if (bits == 0) return Alignment.one;
+        if (bits <= 8) return Alignment.one;
+        if (bits <= 16) return Alignment.two;
+        if (bits <= 32) return Alignment.four;
+    }
 };
 
 pub const Error = error{
@@ -38,13 +51,17 @@ pub const Error = error{
     ConversionSizeError,
     ConversionPointerKindError,
     AlignmentError,
+    InvalidTypeError,
 };
 
 pub const Type = union(enum) {
     void: void,
     null: void,
     bool: void,
-    type: TypeIndex,
+    type: struct { // acts as an alias for a type
+        name: []const u8, // a reference to a type name owned by the registry
+        index: TypeIndex,
+    },
     comptime_int: void,
     comptime_fixed: void,
     integer: struct {
@@ -77,23 +94,21 @@ pub const Type = union(enum) {
         // arrays alignment is always 1 byte
     },
     @"struct": struct {
+        name: ?[]const u8, // a reference to a struct name owned by the registry
         fields: []const FieldInfo,
         size: u32, // this size is the sum of the sizes of the fields
     },
     @"union": struct {
+        name: ?[]const u8, // a reference to a union name owned by the registry
         fields: []const UnionFieldInfo,
         size: u32, // this size is the sum of the sizes of the fields
     },
+    @"enum": struct {
+        name: ?[]const u8, // a reference to an enum name owned by the registry
+        tags: []EnumFieldInfo, // the values of the enum max of 255
+    },
     optional: union(enum) {
-        null: void,
-        some: struct { TypeIndex, u32 },
-
-        pub fn unwrap(self: *Type, registry: Registry) !Type {
-            if (self.optional == .null) {
-                return Type{ .null = {} };
-            }
-            return registry.get_type_by_index(self.optional.some[0]);
-        }
+        child: TypeIndex,
     },
 
     pub fn size(self: *Type) u32 {
@@ -133,6 +148,9 @@ pub const Type = union(enum) {
             },
             .@"union" => |u| {
                 return u.size;
+            },
+            .@"enum" => {
+                return 1; // enums are always 1 byte
             },
             .optional => |o| {
                 if (o == .none) {
@@ -181,6 +199,9 @@ pub const Type = union(enum) {
             .@"union" => {
                 return 1; // unions are always 1 byte
             },
+            .@"enum" => {
+                return 1; // enums are always 1 byte
+            },
             .optional => |o| {
                 if (o == .none) {
                     return 0;
@@ -220,6 +241,9 @@ pub const Type = union(enum) {
             .@"union" => |u| {
                 return u.size == other.@"union".size;
             },
+            .@"enum" => {
+                return true;
+            },
             .optional => |o| {
                 if (o == .none) {
                     return true;
@@ -257,6 +281,9 @@ pub const Type = union(enum) {
                     return other.optional != .none;
                 }
                 return o.some[0] < other.optional.some[0];
+            },
+            else => {
+                return false;
             },
         }
     }
@@ -379,6 +406,27 @@ pub const Type = union(enum) {
             } else {
                 return Error.ConversionSignError;
             }
+        }
+
+        // enum to integer
+        if (self_tag == .@"enum" and target_tag == .integer) {
+            return Type{
+                .integer = .{
+                    .sign = .unsigned,
+                    .size = 8, // enums are always 1 bytes
+                    .alignment = 1, // enums are always 1 byte
+                },
+            };
+        }
+
+        // integer to enum
+        if (self_tag == .integer and target_tag == .@"enum") {
+            return Type{
+                .@"enum" = .{
+                    .name = null,
+                    .tags = null,
+                },
+            };
         }
 
         return Error.InvalidConversionError;
@@ -639,6 +687,293 @@ pub const Type = union(enum) {
 
         return false;
     }
+
+    pub fn toString(self: Type, reg: *Registry, allocator: Allocator) ![]const u8 {
+        const tag = meta.activeTag(self);
+        switch (tag) {
+            .void => {
+                const str = "void";
+                const result = try allocator.alloc(u8, str.len);
+                @memcpy(result, str);
+                return result;
+            },
+            .null => {
+                const str = "null";
+                const result = try allocator.alloc(u8, str.len);
+                @memcpy(result, str);
+                return result;
+            },
+            .bool => {
+                const str = "bool";
+                const result = try allocator.alloc(u8, str.len);
+                @memcpy(result, str);
+                return result;
+            },
+            .type => {
+                const str = self.type.name;
+                const result = try allocator.alloc(u8, 4);
+                @memcpy(result, str);
+                return result;
+            },
+            .comptime_int => {
+                const str = "comptime_int";
+                const result = try allocator.alloc(u8, str.len);
+                @memcpy(result, str);
+                return result;
+            },
+            .comptime_fixed => {
+                const str = "comptime_fixed";
+                const result = try allocator.alloc(u8, str.len);
+                @memcpy(result, str);
+                return result;
+            },
+            .integer => {
+                const sign = if (self.integer.sign == Sign.signed) "i" else "u";
+                const result = try std.fmt.allocPrint(allocator, "{s}{x}", .{ sign, self.integer.size });
+                return result;
+            },
+            .fixed => {
+                const sign = if (self.fixed.sign == Sign.signed) "i" else "u";
+                const result = std.fmt.allocPrint(allocator, "{s}f{x}.{x}", .{ sign, self.fixed.integer_size, self.fixed.fraction_size });
+                return result;
+            },
+            .pointer => {
+                const kind = if (self.pointer.kind == PtrKind.one) "*" else "[*]";
+                const child: Type = reg.get_type_by_index(self.pointer.child) catch return Error.InvalidTypeError;
+                const child_str = try child.toString(reg, allocator);
+                defer allocator.free(child_str);
+                const result = try std.fmt.allocPrint(allocator, "{s}{s}", .{ kind, child_str });
+                return result;
+            },
+            .array => {
+                const child = reg.get_type_by_index(self.array.child) catch return Error.InvalidTypeError;
+                const child_str = try child.toString(reg, allocator);
+                defer allocator.free(child_str);
+                const result = try std.fmt.allocPrint(allocator, "[{x}]{s}", .{ self.array.size, child_str });
+                return result;
+            },
+            .@"struct" => {
+                const str = self.@"struct".name orelse "struct"; // TODO: add generation for anonymous struct names
+                const result = try allocator.alloc(u8, str.len);
+                @memcpy(result, str);
+                return result;
+            },
+            .@"union" => {
+                const str = self.@"union".name orelse "union"; // TODO: add generation for anonymous union names
+                const result = try allocator.alloc(u8, str.len);
+                @memcpy(result, str);
+                return result;
+            },
+            .@"enum" => {
+                const str = self.@"enum".name orelse "enum"; // TODO: add generation for anonymous enum names
+                const result = try allocator.alloc(u8, str.len);
+                @memcpy(result, str);
+                return result;
+            },
+            .optional => {
+                const index = try reg.get_type_by_index(self.optional.child);
+                const child_str = try index.toString(reg, allocator);
+                defer allocator.free(child_str);
+                const result = try std.fmt.allocPrint(allocator, "?{s}", .{child_str});
+                return result;
+            },
+        }
+    }
+
+    pub fn fromString(
+        token: []const u8,
+        reg: *Registry, // may need to register the type eg i8 i7 and so on
+        allocator: Allocator,
+    ) ?Type {
+        // check for empty string
+        if (token.len == 0) {
+            return null;
+        }
+        // trim whitespace
+        const trimmed = std.mem.trim(u8, token, " \t\n\r");
+        // check if token is a pointer
+        var processed: u32 = 0;
+        switch (trimmed[0]) {
+            '[' => {
+                // might be an array or a pointer to many
+                // get the index of the next ']'
+                const end = std.mem.indexOf(u8, trimmed, "]") orelse return null;
+                const inner_token = std.mem.trim(u8, trimmed[1..end], " \t\n\r");
+                const arr_size: ?u32 = std.fmt.parseUnsigned(u32, inner_token, 16) catch null;
+                if (arr_size) |s| {
+                    processed += @intCast(end + 1);
+                    const child_type: Type = Type.fromString(trimmed[processed..], reg, allocator) orelse return null;
+                    const name = child_type.toString(reg, allocator) catch return null;
+                    defer allocator.free(name);
+                    const index = reg.get_type_index(name) catch return null;
+                    const t = Type{
+                        .array = .{
+                            .child = index,
+                            .size = s,
+                        },
+                    };
+                    return t;
+                } else {
+                    if (inner_token[0] == '*') {
+                        // this is a pointer to many
+                        processed += @intCast(end + 1);
+                        const child_type = Type.fromString(trimmed[processed..], reg, allocator) orelse {
+                            return null;
+                        };
+                        const name = child_type.toString(reg, allocator) catch {
+                            return null;
+                        };
+                        defer allocator.free(name);
+                        const index = reg.get_type_index(name) catch return null;
+                        const t = Type{
+                            .pointer = .{
+                                .kind = PtrKind.many,
+                                .child = index,
+                            },
+                        };
+                        return t;
+                    }
+                    return null;
+                }
+            },
+            '*' => {
+                // this is a pointer to one
+                processed += 1;
+                const child_type: Type = Type.fromString(trimmed[processed..], reg, allocator) orelse return null;
+                const name = child_type.toString(reg, allocator) catch return null;
+                defer allocator.free(name);
+                const index = reg.get_type_index(name) catch return null;
+                const t = Type{
+                    .pointer = .{
+                        .kind = PtrKind.one,
+                        .child = index,
+                    },
+                };
+                return t;
+            },
+            'i' => {
+                processed += 1;
+                if (trimmed[processed] == 'f') {
+                    // signed fixed point
+                    processed += 1;
+                    const integer_size: ?u4 = std.fmt.parseUnsigned(u4, trimmed[processed..], 16) catch null;
+                    if (integer_size) |i| {
+                        processed += 1;
+                        const fraction_size: ?u4 = std.fmt.parseUnsigned(u4, trimmed[processed..], 16) catch null;
+                        if (fraction_size) |f| {
+                            const t = Type{
+                                .fixed = .{
+                                    .sign = Sign.signed,
+                                    .integer_size = i,
+                                    .fraction_size = f,
+                                    .alignment = Alignment.nearestAlignment(i + f),
+                                },
+                            };
+                            //check if type is already registered
+                            const name = t.toString(reg, allocator) catch return null;
+                            defer allocator.free(name);
+                            _ = reg.get_type_index(name) catch {
+                                // register the type
+                                _ = reg.register_type(t, name) catch return null;
+                            };
+                            return t;
+                        }
+                    }
+                } else {
+                    // signed integer
+                    const data_size: ?u5 = std.fmt.parseUnsigned(u5, trimmed[processed..], 16) catch null;
+                    if (data_size) |s| {
+                        const t = Type{
+                            .integer = .{
+                                .sign = Sign.signed,
+                                .size = s,
+                                .alignment = Alignment.nearestAlignment(s),
+                            },
+                        };
+                        //check if type is already registered
+                        const name = t.toString(reg, allocator) catch return null;
+                        defer allocator.free(name);
+                        _ = reg.get_type_index(name) catch {
+                            // register the type
+                            _ = reg.register_type(t, name) catch return null;
+                        };
+                        return t;
+                    }
+                }
+            },
+            'u' => {
+                processed += 1;
+                if (trimmed[processed] == 'f') {
+                    // unsigned fixed point
+                    processed += 1;
+                    const integer_size: ?u4 = std.fmt.parseUnsigned(u4, trimmed[processed..], 16) catch null;
+                    if (integer_size) |i| {
+                        processed += 1;
+                        const fraction_size: ?u4 = std.fmt.parseUnsigned(u4, trimmed[processed..], 16) catch null;
+                        if (fraction_size) |f| {
+                            const t = Type{
+                                .fixed = .{
+                                    .sign = Sign.unsigned,
+                                    .integer_size = i,
+                                    .fraction_size = f,
+                                    .alignment = Alignment.nearestAlignment(i + f),
+                                },
+                            };
+                            //check if type is already registered
+                            const name = t.toString(reg, allocator) catch return null;
+                            defer allocator.free(name);
+                            _ = reg.get_type_index(name) catch {
+                                // register the type
+                                _ = reg.register_type(t, name) catch return null;
+                            };
+                            return t;
+                        }
+                    }
+                } else {
+                    // unsigned integer
+                    const data_size: ?u5 = std.fmt.parseUnsigned(u5, trimmed[processed..], 16) catch null;
+                    if (data_size) |s| {
+                        const t = Type{
+                            .integer = .{
+                                .sign = Sign.unsigned,
+                                .size = s,
+                                .alignment = Alignment.nearestAlignment(s),
+                            },
+                        };
+                        //check if type is already registered
+                        const name = t.toString(reg, allocator) catch return null;
+                        defer allocator.free(name);
+                        _ = reg.get_type_index(name) catch {
+                            // register the type
+                            _ = reg.register_type(t, name) catch return null;
+                        };
+                        return t;
+                    }
+                }
+            },
+            '?' => {
+                // optional type
+                processed += 1;
+                const inner_token = std.mem.trim(u8, trimmed[processed..], " \t\n\r");
+                const inner_type: Type = Type.fromString(inner_token, reg, allocator) orelse {
+                    return null;
+                };
+                const name = inner_type.toString(reg, allocator) catch return null;
+                const index = reg.get_type_index(name) catch return null;
+                return Type{
+                    .optional = .{
+                        .child = index,
+                    },
+                };
+            },
+            else => {
+                // this is for named types
+                const t = reg.get_type(trimmed) catch return null;
+                return t;
+            },
+        }
+        return null;
+    }
 };
 
 pub fn Struct(field_info: []const FieldInfo, registry: Registry) !Type {
@@ -697,6 +1032,7 @@ pub const t_comptime_int = Type{ .comptime_int = {} };
 pub const t_comptime_fixed = Type{ .comptime_fixed = {} };
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const meta = std.meta;
 const ArrayList = std.ArrayList;
 const Registry = @import("registry.zig");

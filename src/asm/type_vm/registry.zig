@@ -12,8 +12,8 @@ registered_types_map: TypeMap,
 
 pub fn init(allocator: Allocator) !Registry {
     return Registry{
-        .registered_types = try TypeList.init(allocator),
-        .registered_types_map = try TypeMap.init(allocator),
+        .registered_types = TypeList.init(allocator),
+        .registered_types_map = TypeMap.init(allocator),
     };
 }
 
@@ -22,10 +22,10 @@ pub fn deinit(self: *Registry) void {
     self.registered_types_map.deinit();
 }
 
-pub fn register_type(self: *Registry, type_: Type) !TypeIndex {
-    const index = self.registered_types.items.len;
-    self.get_type(type_.name) catch {
-        try self.registered_types_map.put(type_.name, index);
+pub fn register_type(self: *Registry, type_: Type, name: []const u8) !TypeIndex {
+    const index: u32 = @intCast(self.registered_types.items.len);
+    _ = self.get_type(name) catch {
+        try self.registered_types_map.put(name, index);
         try self.registered_types.append(type_);
         return @intCast(index);
     };
