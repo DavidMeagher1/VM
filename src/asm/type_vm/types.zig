@@ -35,12 +35,13 @@ pub const Alignment = enum {
     two,
     four,
 
-    pub fn nearestAlignment(bits: u5) Alignment {
+    pub fn nearestAlignment(bits: u6) Alignment {
         // this should round up to the nearest alignment
         if (bits == 0) return Alignment.one;
         if (bits <= 8) return Alignment.one;
         if (bits <= 16) return Alignment.two;
         if (bits <= 32) return Alignment.four;
+        return Alignment.four; // this should never happen
     }
 };
 
@@ -55,6 +56,7 @@ pub const Error = error{
 };
 
 pub const Type = union(enum) {
+    any: void, // can become any other type, used for the type checker
     void: void,
     null: void,
     bool: void,
@@ -66,13 +68,13 @@ pub const Type = union(enum) {
     comptime_fixed: void,
     integer: struct {
         sign: Sign,
-        size: u5, // the max number is 31 so the actual size is size + 1
+        size: u6, // the max number is 31 so the actual size is size + 1
         alignment: Alignment, // 0 = 1 byte, 1 = 2 bytes, 2 = 4 bytes
     },
     fixed: struct {
         sign: Sign,
-        integer_size: u4, // the max number is 15 so the actual size is size + 1
-        fraction_size: u4, // the max number is 15 so the actual size is size + 1
+        integer_size: u5, // the max number is 15 so the actual size is size + 1
+        fraction_size: u5, // the max number is 15 so the actual size is size + 1
         alignment: Alignment, // 0 = 1 byte, 1 = 2 bytes, 2 = 4 bytes
 
         pub fn getScalingFactor(self: Type) u32 {
@@ -111,8 +113,11 @@ pub const Type = union(enum) {
         child: TypeIndex,
     },
 
-    pub fn size(self: *Type) u32 {
+    pub fn size(self: Type, reg: *Registry) !u32 {
         switch (meta.activeTag(self)) {
+            .any => {
+                return 0; // any type has no size
+            },
             .void => {
                 return 0;
             },
@@ -131,38 +136,59 @@ pub const Type = union(enum) {
             .comptime_fixed => {
                 return 4; // comptime fixed is always 4 bytes
             },
-            .integer => |i| {
-                return i.size + 1 / 8;
+            .integer => {
+                if (self.integer.size > 32) {
+                    return Error.InvalidTypeError;
+                }
+                return self.integer.size / 8;
             },
-            .fixed => |f| {
-                return (f.integer_size + f.fraction_size + 1) / 8;
+            .fixed => {
+                if (self.fixed.integer_size > 16 or self.fixed.fraction_size > 16) {
+                    return Error.InvalidTypeError;
+                }
+                return (self.fixed.integer_size + self.fixed.fraction_size) / 8;
             },
             .pointer => {
                 return 2; // pointers are always 2 bytes
             },
-            .array => |a| {
-                return a.size * a.child.size();
+            .array => {
+                const child = try reg.get_type_by_index(self.array.child);
+                const child_size = try child.size(reg);
+                return self.array.size * child_size;
             },
-            .@"struct" => |s| {
-                return s.size;
+            .@"struct" => {
+                var s: u32 = 0;
+                for (self.@"struct".fields) |field| {
+                    const field_type = try reg.get_type_by_index(field.type_index);
+                    const field_size = try field_type.size(reg);
+                    s += field_size;
+                }
+                return s;
             },
-            .@"union" => |u| {
-                return u.size;
+            .@"union" => {
+                var s: u32 = 0;
+                for (self.@"union".fields) |field| {
+                    const field_type = try reg.get_type_by_index(field.type_index);
+                    const field_size = try field_type.size(reg);
+                    s += field_size;
+                }
+                return s;
             },
             .@"enum" => {
                 return 1; // enums are always 1 byte
             },
-            .optional => |o| {
-                if (o == .none) {
-                    return 0;
-                }
-                return o.some[1];
+            .optional => {
+                const child = try reg.get_type_by_index(self.optional.child);
+                return child.size(reg);
             },
         }
     }
 
     pub fn alignment(self: *Type) u32 {
         switch (meta.activeTag(self)) {
+            .any => {
+                return 0; // any type has no alignment
+            },
             .void => {
                 return 0;
             },
@@ -181,11 +207,11 @@ pub const Type = union(enum) {
             .comptime_fixed => {
                 return 4; // comptime fixed is always 4 bytes
             },
-            .integer => |i| {
-                return i.alignment;
+            .integer => {
+                return self.integer.alignment;
             },
-            .fixed => |f| {
-                return f.alignment;
+            .fixed => {
+                return self.fixed.alignment;
             },
             .pointer => {
                 return 1; // pointers are always 1 byte
@@ -202,16 +228,16 @@ pub const Type = union(enum) {
             .@"enum" => {
                 return 1; // enums are always 1 byte
             },
-            .optional => |o| {
-                if (o == .none) {
-                    return 0;
-                }
-                return o.some[1];
+            .optional => {
+                return 0; // TODO: fix size and alignment
             },
         }
     }
 
     pub fn isEqual(self: Type, other: Type) bool {
+        if (meta.activeTag(self) == .any or meta.activeTag(other) == .any) {
+            return true; // any type is equal to any type
+        }
         if (meta.activeTag(self) != meta.activeTag(other)) {
             return false;
         }
@@ -254,6 +280,9 @@ pub const Type = union(enum) {
     }
 
     pub fn isSmaller(self: Type, other: Type) bool {
+        if (meta.activeTag(self) == .any or meta.activeTag(other) == .any) {
+            return false; // any type is not smaller than any type
+        }
         if (meta.activeTag(self) != meta.activeTag(other)) {
             return self.size() < other.size();
         }
@@ -289,7 +318,7 @@ pub const Type = union(enum) {
     }
 
     pub fn promote(self: Type, target: Type) !Type {
-        if (self.isEqual(target)) return self;
+        if (self.isEqual(target)) return target;
         const self_tag = meta.activeTag(self);
         const target_tag = meta.activeTag(target);
         // special case for comptime_int and comptime_fixed
@@ -323,7 +352,7 @@ pub const Type = union(enum) {
     }
 
     pub fn convert(self: Type, target: Type) !Type {
-        if (self.isEqual(target)) return self;
+        if (self.isEqual(target)) return target;
         const self_tag = meta.activeTag(self);
         const target_tag = meta.activeTag(target);
         // special case for comptime_int and comptime_fixed
@@ -433,7 +462,7 @@ pub const Type = union(enum) {
     }
 
     pub fn cast(self: Type, target: Type) !Type {
-        if (self.isEqual(target)) return self;
+        if (self.isEqual(target)) return target;
         const self_tag = meta.activeTag(self);
         const target_tag = meta.activeTag(target);
 
@@ -691,6 +720,12 @@ pub const Type = union(enum) {
     pub fn toString(self: Type, reg: *Registry, allocator: Allocator) ![]const u8 {
         const tag = meta.activeTag(self);
         switch (tag) {
+            .any => {
+                const str = "any";
+                const result = try allocator.alloc(u8, str.len);
+                @memcpy(result, str);
+                return result;
+            },
             .void => {
                 const str = "void";
                 const result = try allocator.alloc(u8, str.len);
@@ -856,10 +891,10 @@ pub const Type = union(enum) {
                 if (trimmed[processed] == 'f') {
                     // signed fixed point
                     processed += 1;
-                    const integer_size: ?u4 = std.fmt.parseUnsigned(u4, trimmed[processed..], 16) catch null;
+                    const integer_size: ?u5 = std.fmt.parseUnsigned(u5, trimmed[processed..], 16) catch null;
                     if (integer_size) |i| {
                         processed += 1;
-                        const fraction_size: ?u4 = std.fmt.parseUnsigned(u4, trimmed[processed..], 16) catch null;
+                        const fraction_size: ?u5 = std.fmt.parseUnsigned(u5, trimmed[processed..], 16) catch null;
                         if (fraction_size) |f| {
                             const t = Type{
                                 .fixed = .{
@@ -881,7 +916,7 @@ pub const Type = union(enum) {
                     }
                 } else {
                     // signed integer
-                    const data_size: ?u5 = std.fmt.parseUnsigned(u5, trimmed[processed..], 16) catch null;
+                    const data_size: ?u6 = std.fmt.parseUnsigned(u6, trimmed[processed..], 16) catch null;
                     if (data_size) |s| {
                         const t = Type{
                             .integer = .{
@@ -906,10 +941,10 @@ pub const Type = union(enum) {
                 if (trimmed[processed] == 'f') {
                     // unsigned fixed point
                     processed += 1;
-                    const integer_size: ?u4 = std.fmt.parseUnsigned(u4, trimmed[processed..], 16) catch null;
+                    const integer_size: ?u5 = std.fmt.parseUnsigned(u5, trimmed[processed..], 16) catch null;
                     if (integer_size) |i| {
                         processed += 1;
-                        const fraction_size: ?u4 = std.fmt.parseUnsigned(u4, trimmed[processed..], 16) catch null;
+                        const fraction_size: ?u5 = std.fmt.parseUnsigned(u5, trimmed[processed..], 16) catch null;
                         if (fraction_size) |f| {
                             const t = Type{
                                 .fixed = .{
@@ -931,7 +966,7 @@ pub const Type = union(enum) {
                     }
                 } else {
                     // unsigned integer
-                    const data_size: ?u5 = std.fmt.parseUnsigned(u5, trimmed[processed..], 16) catch null;
+                    const data_size: ?u6 = std.fmt.parseUnsigned(u6, trimmed[processed..], 16) catch null;
                     if (data_size) |s| {
                         const t = Type{
                             .integer = .{
@@ -1024,13 +1059,6 @@ pub fn Pointer(kind: u1, type_index: TypeIndex) Type {
 }
 
 // the following types are used because they have no configuration
-pub const t_void = Type{ .void = {} };
-pub const t_null = Type{ .null = {} };
-pub const t_bool = Type{ .bool = {} };
-pub const t_type = Type{ .type = {} };
-pub const t_comptime_int = Type{ .comptime_int = {} };
-pub const t_comptime_fixed = Type{ .comptime_fixed = {} };
-
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const meta = std.meta;

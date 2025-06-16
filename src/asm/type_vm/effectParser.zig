@@ -60,10 +60,17 @@ pub fn parseType(allocator: Allocator, token: []const u8, reg: *Registry) !struc
         },
     }
     processed += 1;
+
+    // check for generic
+    if (trimmed[processed] == '\'') {
+        return .{ stack_slector, Type{ .any = undefined } };
+    }
+
     // check for the type
     const t = Type.fromString(trimmed[processed..], reg, allocator) orelse {
         return Error.InvalidStackEffectType;
     };
+
     return .{ stack_slector, t };
 }
 
@@ -101,6 +108,7 @@ pub fn parseStackEffect(
             continue;
         }
         const t_info = try parseType(allocator, token, reg);
+
         // check for the stack selector
         switch (state) {
             .removals => {
@@ -146,42 +154,19 @@ test "parseStackEffect" {
     const allocator = std.heap.page_allocator;
     var reg = try Registry.init(allocator);
     defer reg.deinit();
-    const effect = "(@ia @i8 -- #i8)";
-    _ = try reg.register_type(
-        Type{ .integer = .{
-            .sign = .signed,
-            .size = 7,
-            .alignment = .one,
-        } },
-        "i8",
-    );
-    _ = try reg.register_type(
-        Type{ .integer = .{
-            .sign = .signed,
-            .size = 15,
-            .alignment = .two,
-        } },
-        "i10",
-    );
-    _ = try reg.register_type(
-        Type{ .integer = .{
-            .sign = .signed,
-            .size = 31,
-            .alignment = .four,
-        } },
-        "i20",
-    );
+    const effect = "(@[a]i20 #ia -- )";
+    // integer and fixed point types get registered automatically
     const parsed = try parseStackEffect(allocator, effect, &reg);
     std.debug.print("Parsed stack effect: {any}\n", .{parsed});
     // print the types
     for (parsed.removals) |t| {
         std.debug.print("Removal type: {s}\n", .{try t.toString(&reg, allocator)});
-        std.debug.print("Removal type size: {d}\n", .{t.integer.size});
+        std.debug.print("Removal type size: {!x}\n", .{t.size(&reg)});
     }
 
     for (parsed.additions) |t| {
         std.debug.print("Addition type: {s}\n", .{try t.toString(&reg, allocator)});
-        std.debug.print("Addition type size: {d}\n", .{t.integer.size});
+        std.debug.print("Addition type size: {!x}\n", .{t.size(&reg)});
     }
 }
 
