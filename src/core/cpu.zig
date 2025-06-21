@@ -49,7 +49,7 @@ pub const Register = enum {
     status,
     // bit layout:
     // 0: 0x01 - Interrupt enable 0x00 - Interrupt disable
-    interrupt_mask,
+    intm, // Interrupt mask register
     wsp,
     wbp,
     rsp,
@@ -80,10 +80,6 @@ registers: struct {
             .pc => self.pc,
             .status => self.status,
             .intm => self.intm,
-            .wsp => self.data_stack.sp,
-            .wbp => self.data_stack.bp,
-            .rsp => self.return_stack.sp,
-            .rbp => self.return_stack.bp,
             else => return RegisterError.InvalidRegister,
         };
         const bytes = &std.mem.toBytes(value);
@@ -105,22 +101,6 @@ registers: struct {
             .intm => {
                 const value = std.mem.bytesAsValue(u16, bytes);
                 self.intm = value.*;
-            },
-            .wsp => {
-                const value = std.mem.bytesAsValue(u16, bytes);
-                self.data_stack.sp = value.*;
-            },
-            .wbp => {
-                const value = std.mem.bytesAsValue(u16, bytes);
-                self.data_stack.bp = value.*;
-            },
-            .rsp => {
-                const value = std.mem.bytesAsValue(u16, bytes);
-                self.return_stack.sp = value.*;
-            },
-            .rbp => {
-                const value = std.mem.bytesAsValue(u16, bytes);
-                self.return_stack.bp = value.*;
             },
             else => return RegisterError.InvalidRegister,
         }
