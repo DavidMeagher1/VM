@@ -1,5 +1,5 @@
 # Zig build artifacts
-zig-out/
+.zig-out/
 .zig-cache/
 
 # IDE specific files
@@ -11,6 +11,3 @@ zig-out/
 # Operating System specific files
 .DS_Store
 Thumbs.db
-
-
-brainstorming.txt
